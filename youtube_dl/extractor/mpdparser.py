@@ -120,6 +120,17 @@ class MPDParser:
         t.replace('$$', '$')
         return t
 
+    def add_segment_url(self):
+        segment_url = self.media_template % {
+            'Time': self.segment_time,
+            'Bandwidth': self.bandwidth,
+            'Number': self.segment_number,
+        }
+        self.representation_ms_info['fragments'].append({
+            self.media_location_key: segment_url,
+            'duration': float_or_none(self.segment_d, self.representation_ms_info['timescale']),
+        })
+
     def parse(self):
         self.mpd_duration = parse_duration(self.mpd_doc.get('mediaPresentationDuration'))
         self.formats = []
@@ -224,18 +235,6 @@ class MPDParser:
                                 self.segment_time = 0
                                 self.segment_d = None
                                 self.segment_number = self.representation_ms_info['start_number']
-
-                                def add_segment_url():
-                                    print("add_segment_url called")
-                                    segment_url = self.media_template % {
-                                        'Time': self.segment_time,
-                                        'Bandwidth': self.bandwidth,
-                                        'Number': self.segment_number,
-                                    }
-                                    self.representation_ms_info['fragments'].append({
-                                        self.media_location_key: segment_url,
-                                        'duration': float_or_none(self.segment_d, self.representation_ms_info['timescale']),
-                                    })
 
                                 for num, s in enumerate(self.representation_ms_info['s']):
                                     self.segment_time = s.get('t') or self.segment_time
