@@ -1,6 +1,7 @@
 # coding: utf-8
 
 import re
+import math
 
 from ..utils import (
     float_or_none, 
@@ -92,12 +93,13 @@ class MPDParser:
         return ms_info
 
     # Helper method for process_video_audio
+    @staticmethod
     def location_key(location):
         return 'url' if re.match(r'^https?://', location) else 'path'
 
     # Helper method for process_video_audio
-    def prepare_template(template_name, identifiers, r_ms_info, rep_id):
-        tmpl = r_ms_info[template_name]
+    def prepare_template(self, template_name, identifiers):
+        tmpl = self.representation_ms_info[template_name]
         # First of, % characters outside $...$ templates
         # must be escaped by doubling for proper processing
         # by % operator string formatting used further (see
@@ -112,7 +114,7 @@ class MPDParser:
                 t += c
         # Next, $...$ templates are translated to their
         # %(...) counterparts to be used with % operator
-        t = t.replace('$RepresentationID$', rep_id)
+        t = t.replace('$RepresentationID$', self.representation_id)
         t = re.sub(r'\$(%s)\$' % '|'.join(identifiers), r'%(\1)d', t)
         t = re.sub(r'\$(%s)%%([^$]+)\$' % '|'.join(identifiers), r'%(\1)\2', t)
         t.replace('$$', '$')
@@ -183,20 +185,20 @@ class MPDParser:
                         # so it should be handled just the same way (see
                         # https://github.com/ytdl-org/youtube-dl/issues/11605)
                         if 'initialization' in self.representation_ms_info:
-                            initialization_template = prepare_template(
+                            initialization_template = self.prepare_template(
                                 'initialization',
                                 # As per [1, 5.3.9.4.2, Table 15, page 54] $Number$ and
                                 # $Time$ shall not be included for @initialization thus
                                 # only $Bandwidth$ remains
-                                ('Bandwidth', ), self.representation_ms_info, self.representation_id)
+                                ('Bandwidth', ))
                             self.representation_ms_info['initialization_url'] = initialization_template % {
                                 'Bandwidth': self.bandwidth,
                             }
 
                         if 'segment_urls' not in self.representation_ms_info and 'media' in self.representation_ms_info:
 
-                            self.media_template = prepare_template('media', ('Number', 'Bandwidth', 'Time'), self.representation_ms_info, self.representation_id)
-                            self.media_location_key = location_key(self.media_template)
+                            self.media_template = self.prepare_template('media', ('Number', 'Bandwidth', 'Time'))
+                            self.media_location_key = MPDParser.location_key(self.media_template)
 
                             # As per [1, 5.3.9.4.4, Table 16, page 55] $Number$ and $Time$
                             # can't be used at the same time
@@ -224,6 +226,7 @@ class MPDParser:
                                 self.segment_number = self.representation_ms_info['start_number']
 
                                 def add_segment_url():
+                                    print("add_segment_url called")
                                     segment_url = self.media_template % {
                                         'Time': self.segment_time,
                                         'Bandwidth': self.bandwidth,
@@ -291,9 +294,9 @@ class MPDParser:
                             })
                             if 'initialization_url' in self.representation_ms_info:
                                 initialization_url = self.representation_ms_info['initialization_url']
-                                if not f.get('url'):
+                                if not self.f.get('url'):
                                     self.f['url'] = initialization_url
-                                self.f['fragments'].append({location_key(initialization_url): initialization_url})
+                                self.f['fragments'].append({MPDParser.location_key(initialization_url): initialization_url})
                             self.f['fragments'].extend(self.representation_ms_info['fragments'])
                         else:
                             # Assuming direct URL to unfragmented media.
