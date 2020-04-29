@@ -131,6 +131,159 @@ class MPDParser:
             'duration': float_or_none(self.segment_d, self.representation_ms_info['timescale']),
         })
 
+    def process_video_audio(self):
+        self.base_url = ''
+        for element in (self.representation, self.adaptation_set, self.period, self.mpd_doc):
+            base_url_e = element.find(self._add_ns('BaseURL'))
+            if base_url_e is not None:
+                self.base_url = base_url_e.text + self.base_url
+                if re.match(r'^https?://', self.base_url):
+                    break
+        if self.mpd_base_url and not re.match(r'^https?://', self.base_url):
+            if not self.mpd_base_url.endswith('/') and not base_url.startswith('/'):
+                self.mpd_base_url += '/'
+            self.base_url = self.mpd_base_url + self.base_url
+        self.representation_id = self.representation_attrib.get('id')
+        self.lang = self.representation_attrib.get('lang')
+        self.url_el = self.representation.find(self._add_ns('BaseURL'))
+        self.filesize = int_or_none(self.url_el.attrib.get('{http://youtube.com/yt/2012/10/10}contentLength') if self.url_el is not None else None)
+        self.bandwidth = int_or_none(self.representation_attrib.get('bandwidth'))
+        self.f = {
+            'format_id': '%s-%s' % (self.mpd_id, self.representation_id) if self.mpd_id else self.representation_id,
+            'manifest_url': self.mpd_url,
+            'ext': mimetype2ext(self.mime_type),
+            'width': int_or_none(self.representation_attrib.get('width')),
+            'height': int_or_none(self.representation_attrib.get('height')),
+            'tbr': float_or_none(self.bandwidth, 1000),
+            'asr': int_or_none(self.representation_attrib.get('audioSamplingRate')),
+            'fps': int_or_none(self.representation_attrib.get('frameRate')),
+            'language': self.lang if self.lang not in ('mul', 'und', 'zxx', 'mis') else None,
+            'format_note': 'DASH %s' % self.content_type,
+            'filesize': self.filesize,
+            'container': mimetype2ext(self.mime_type) + '_dash',
+        }
+        self.f.update(parse_codecs(self.representation_attrib.get('codecs')))
+        self.representation_ms_info = self.extract_multisegment_info(self.representation, self.adaption_set_ms_info)
+
+        # @initialization is a regular template like @media one
+        # so it should be handled just the same way (see
+        # https://github.com/ytdl-org/youtube-dl/issues/11605)
+        if 'initialization' in self.representation_ms_info:
+            initialization_template = self.prepare_template(
+                'initialization',
+                # As per [1, 5.3.9.4.2, Table 15, page 54] $Number$ and
+                # $Time$ shall not be included for @initialization thus
+                # only $Bandwidth$ remains
+                ('Bandwidth', ))
+            self.representation_ms_info['initialization_url'] = initialization_template % {
+                'Bandwidth': self.bandwidth,
+            }
+
+        if 'segment_urls' not in self.representation_ms_info and 'media' in self.representation_ms_info:
+
+            self.media_template = self.prepare_template('media', ('Number', 'Bandwidth', 'Time'))
+            self.media_location_key = MPDParser.location_key(self.media_template)
+
+            # As per [1, 5.3.9.4.4, Table 16, page 55] $Number$ and $Time$
+            # can't be used at the same time
+            if '%(Number' in self.media_template and 's' not in self.representation_ms_info:
+                self.segment_duration = None
+                if 'total_number' not in self.representation_ms_info and 'segment_duration' in self.representation_ms_info:
+                    self.segment_duration = float_or_none(self.representation_ms_info['segment_duration'], self.representation_ms_info['timescale'])
+                    self.representation_ms_info['total_number'] = int(math.ceil(float(self.period_duration) / self.segment_duration))
+                self.representation_ms_info['fragments'] = [{
+                    self.media_location_key: self.media_template % {
+                        'Number': segment_number,
+                        'Bandwidth': self.bandwidth,
+                    },
+                    'duration': self.segment_duration,
+                } for segment_number in range(
+                    self.representation_ms_info['start_number'],
+                    self.representation_ms_info['total_number'] + self.representation_ms_info['start_number'])]
+            else:
+                # $Number*$ or $Time$ in media template with S list available
+                # Example $Number*$: http://www.svtplay.se/klipp/9023742/stopptid-om-bjorn-borg
+                # Example $Time$: https://play.arkena.com/embed/avp/v2/player/media/b41dda37-d8e7-4d3f-b1b5-9a9db578bdfe/1/129411
+                self.representation_ms_info['fragments'] = []
+                self.segment_time = 0
+                self.segment_d = None
+                self.segment_number = self.representation_ms_info['start_number']
+
+                for num, s in enumerate(self.representation_ms_info['s']):
+                    self.segment_time = s.get('t') or self.segment_time
+                    self.segment_d = s['d']
+                    add_segment_url()
+                    self.segment_number += 1
+                    for r in range(s.get('r', 0)):
+                        self.segment_time += self.segment_d
+                        add_segment_url()
+                        self.segment_number += 1
+                    self.segment_time += self.segment_d
+        elif 'segment_urls' in self.representation_ms_info and 's' in self.representation_ms_info:
+            # No media template
+            # Example: https://www.youtube.com/watch?v=iXZV5uAYMJI
+            # or any YouTube dashsegments video
+            fragments = []
+            segment_index = 0
+            timescale = self.representation_ms_info['timescale']
+            for s in self.representation_ms_info['s']:
+                duration = float_or_none(s['d'], timescale)
+                for r in range(s.get('r', 0) + 1):
+                    segment_uri = self.representation_ms_info['segment_urls'][segment_index]
+                    fragments.append({
+                        location_key(segment_uri): segment_uri,
+                        'duration': duration,
+                    })
+                    segment_index += 1
+            self.representation_ms_info['fragments'] = fragments
+        elif 'segment_urls' in self.representation_ms_info:
+            # Segment URLs with no SegmentTimeline
+            # Example: https://www.seznam.cz/zpravy/clanek/cesko-zasahne-vitr-o-sile-vichrice-muze-byt-i-zivotu-nebezpecny-39091
+            # https://github.com/ytdl-org/youtube-dl/pull/14844
+            fragments = []
+            self.segment_duration = float_or_none(
+                self.representation_ms_info['segment_duration'],
+                self.representation_ms_info['timescale']) if 'segment_duration' in self.representation_ms_info else None
+            for segment_url in self.representation_ms_info['segment_urls']:
+                fragment = {
+                    location_key(segment_url): segment_url,
+                }
+                if self.segment_duration:
+                    fragment['duration'] = self.segment_duration
+                fragments.append(fragment)
+            self.representation_ms_info['fragments'] = fragments
+        # If there is a fragments key available then we correctly recognized fragmented media.
+        # Otherwise we will assume unfragmented media with direct access. Technically, such
+        # assumption is not necessarily correct since we may simply have no support for
+        # some forms of fragmented media renditions yet, but for now we'll use this fallback.
+        if 'fragments' in self.representation_ms_info:
+            self.f.update({
+                # NB: mpd_url may be empty when MPD manifest is parsed from a string
+                'url': self.mpd_url or self.base_url,
+                'fragment_base_url': self.base_url,
+                'fragments': [],
+                'protocol': 'http_dash_segments',
+            })
+            if 'initialization_url' in self.representation_ms_info:
+                initialization_url = self.representation_ms_info['initialization_url']
+                if not self.f.get('url'):
+                    self.f['url'] = initialization_url
+                self.f['fragments'].append({MPDParser.location_key(initialization_url): initialization_url})
+            self.f['fragments'].extend(self.representation_ms_info['fragments'])
+        else:
+            # Assuming direct URL to unfragmented media.
+            self.f['url'] = self.base_url
+
+        # According to [1, 5.3.5.2, Table 7, page 35] @id of Representation
+        # is not necessarily unique within a Period thus formats with
+        # the same `format_id` are quite possible. There are numerous examples
+        # of such manifests (see https://github.com/ytdl-org/youtube-dl/issues/15111,
+        # https://github.com/ytdl-org/youtube-dl/issues/13919)
+        full_info = self.formats_dict.get(self.representation_id, {}).copy()
+        full_info.update(self.f)
+        self.formats.append(full_info)
+
+
     def process_representation(self, representation):
         self.representation = representation
         if self.is_drm_protected(self.representation):
@@ -144,156 +297,7 @@ class MPDParser:
             # TODO implement WebVTT downloading
             return
         elif self.content_type in ('video', 'audio'):
-            self.base_url = ''
-            for element in (self.representation, self.adaptation_set, self.period, self.mpd_doc):
-                base_url_e = element.find(self._add_ns('BaseURL'))
-                if base_url_e is not None:
-                    self.base_url = base_url_e.text + self.base_url
-                    if re.match(r'^https?://', self.base_url):
-                        break
-            if self.mpd_base_url and not re.match(r'^https?://', self.base_url):
-                if not self.mpd_base_url.endswith('/') and not base_url.startswith('/'):
-                    self.mpd_base_url += '/'
-                self.base_url = self.mpd_base_url + self.base_url
-            self.representation_id = self.representation_attrib.get('id')
-            self.lang = self.representation_attrib.get('lang')
-            self.url_el = self.representation.find(self._add_ns('BaseURL'))
-            self.filesize = int_or_none(self.url_el.attrib.get('{http://youtube.com/yt/2012/10/10}contentLength') if self.url_el is not None else None)
-            self.bandwidth = int_or_none(self.representation_attrib.get('bandwidth'))
-            self.f = {
-                'format_id': '%s-%s' % (self.mpd_id, self.representation_id) if self.mpd_id else self.representation_id,
-                'manifest_url': self.mpd_url,
-                'ext': mimetype2ext(self.mime_type),
-                'width': int_or_none(self.representation_attrib.get('width')),
-                'height': int_or_none(self.representation_attrib.get('height')),
-                'tbr': float_or_none(self.bandwidth, 1000),
-                'asr': int_or_none(self.representation_attrib.get('audioSamplingRate')),
-                'fps': int_or_none(self.representation_attrib.get('frameRate')),
-                'language': self.lang if self.lang not in ('mul', 'und', 'zxx', 'mis') else None,
-                'format_note': 'DASH %s' % self.content_type,
-                'filesize': self.filesize,
-                'container': mimetype2ext(self.mime_type) + '_dash',
-            }
-            self.f.update(parse_codecs(self.representation_attrib.get('codecs')))
-            self.representation_ms_info = self.extract_multisegment_info(self.representation, self.adaption_set_ms_info)
-
-            # @initialization is a regular template like @media one
-            # so it should be handled just the same way (see
-            # https://github.com/ytdl-org/youtube-dl/issues/11605)
-            if 'initialization' in self.representation_ms_info:
-                initialization_template = self.prepare_template(
-                    'initialization',
-                    # As per [1, 5.3.9.4.2, Table 15, page 54] $Number$ and
-                    # $Time$ shall not be included for @initialization thus
-                    # only $Bandwidth$ remains
-                    ('Bandwidth', ))
-                self.representation_ms_info['initialization_url'] = initialization_template % {
-                    'Bandwidth': self.bandwidth,
-                }
-
-            if 'segment_urls' not in self.representation_ms_info and 'media' in self.representation_ms_info:
-
-                self.media_template = self.prepare_template('media', ('Number', 'Bandwidth', 'Time'))
-                self.media_location_key = MPDParser.location_key(self.media_template)
-
-                # As per [1, 5.3.9.4.4, Table 16, page 55] $Number$ and $Time$
-                # can't be used at the same time
-                if '%(Number' in self.media_template and 's' not in self.representation_ms_info:
-                    self.segment_duration = None
-                    if 'total_number' not in self.representation_ms_info and 'segment_duration' in self.representation_ms_info:
-                        self.segment_duration = float_or_none(self.representation_ms_info['segment_duration'], self.representation_ms_info['timescale'])
-                        self.representation_ms_info['total_number'] = int(math.ceil(float(self.period_duration) / self.segment_duration))
-                    self.representation_ms_info['fragments'] = [{
-                        self.media_location_key: self.media_template % {
-                            'Number': segment_number,
-                            'Bandwidth': self.bandwidth,
-                        },
-                        'duration': self.segment_duration,
-                    } for segment_number in range(
-                        self.representation_ms_info['start_number'],
-                        self.representation_ms_info['total_number'] + self.representation_ms_info['start_number'])]
-                else:
-                    # $Number*$ or $Time$ in media template with S list available
-                    # Example $Number*$: http://www.svtplay.se/klipp/9023742/stopptid-om-bjorn-borg
-                    # Example $Time$: https://play.arkena.com/embed/avp/v2/player/media/b41dda37-d8e7-4d3f-b1b5-9a9db578bdfe/1/129411
-                    self.representation_ms_info['fragments'] = []
-                    self.segment_time = 0
-                    self.segment_d = None
-                    self.segment_number = self.representation_ms_info['start_number']
-
-                    for num, s in enumerate(self.representation_ms_info['s']):
-                        self.segment_time = s.get('t') or self.segment_time
-                        self.segment_d = s['d']
-                        add_segment_url()
-                        self.segment_number += 1
-                        for r in range(s.get('r', 0)):
-                            self.segment_time += self.segment_d
-                            add_segment_url()
-                            self.segment_number += 1
-                        self.segment_time += self.segment_d
-            elif 'segment_urls' in self.representation_ms_info and 's' in self.representation_ms_info:
-                # No media template
-                # Example: https://www.youtube.com/watch?v=iXZV5uAYMJI
-                # or any YouTube dashsegments video
-                fragments = []
-                segment_index = 0
-                timescale = self.representation_ms_info['timescale']
-                for s in self.representation_ms_info['s']:
-                    duration = float_or_none(s['d'], timescale)
-                    for r in range(s.get('r', 0) + 1):
-                        segment_uri = self.representation_ms_info['segment_urls'][segment_index]
-                        fragments.append({
-                            location_key(segment_uri): segment_uri,
-                            'duration': duration,
-                        })
-                        segment_index += 1
-                self.representation_ms_info['fragments'] = fragments
-            elif 'segment_urls' in self.representation_ms_info:
-                # Segment URLs with no SegmentTimeline
-                # Example: https://www.seznam.cz/zpravy/clanek/cesko-zasahne-vitr-o-sile-vichrice-muze-byt-i-zivotu-nebezpecny-39091
-                # https://github.com/ytdl-org/youtube-dl/pull/14844
-                fragments = []
-                self.segment_duration = float_or_none(
-                    self.representation_ms_info['segment_duration'],
-                    self.representation_ms_info['timescale']) if 'segment_duration' in self.representation_ms_info else None
-                for segment_url in self.representation_ms_info['segment_urls']:
-                    fragment = {
-                        location_key(segment_url): segment_url,
-                    }
-                    if self.segment_duration:
-                        fragment['duration'] = self.segment_duration
-                    fragments.append(fragment)
-                self.representation_ms_info['fragments'] = fragments
-            # If there is a fragments key available then we correctly recognized fragmented media.
-            # Otherwise we will assume unfragmented media with direct access. Technically, such
-            # assumption is not necessarily correct since we may simply have no support for
-            # some forms of fragmented media renditions yet, but for now we'll use this fallback.
-            if 'fragments' in self.representation_ms_info:
-                self.f.update({
-                    # NB: mpd_url may be empty when MPD manifest is parsed from a string
-                    'url': self.mpd_url or self.base_url,
-                    'fragment_base_url': self.base_url,
-                    'fragments': [],
-                    'protocol': 'http_dash_segments',
-                })
-                if 'initialization_url' in self.representation_ms_info:
-                    initialization_url = self.representation_ms_info['initialization_url']
-                    if not self.f.get('url'):
-                        self.f['url'] = initialization_url
-                    self.f['fragments'].append({MPDParser.location_key(initialization_url): initialization_url})
-                self.f['fragments'].extend(self.representation_ms_info['fragments'])
-            else:
-                # Assuming direct URL to unfragmented media.
-                self.f['url'] = self.base_url
-
-            # According to [1, 5.3.5.2, Table 7, page 35] @id of Representation
-            # is not necessarily unique within a Period thus formats with
-            # the same `format_id` are quite possible. There are numerous examples
-            # of such manifests (see https://github.com/ytdl-org/youtube-dl/issues/15111,
-            # https://github.com/ytdl-org/youtube-dl/issues/13919)
-            full_info = self.formats_dict.get(self.representation_id, {}).copy()
-            full_info.update(self.f)
-            self.formats.append(full_info)
+            self.process_video_audio()
         else:
             self.ie.report_warning('Unknown MIME type %s in DASH manifest' % self.mime_type)
 
@@ -525,34 +529,5 @@ class MPDParser:
             self.process_video_audio()
         else:
             self.ie.report_warning('Unknown MIME type %s in DASH manifest' % mime_type)
-        
 
-    def process_adaptation_set(self, adaptation_set):
-        if self.is_drm_protected(adaptation_set):
-            return
-
-        self.adaptation_set = adaptation_set
-        self.adaption_set_ms_info = self.extract_multisegment_info(
-            adaptation_set,
-            self.period_ms_info
-        )
-        for representation in adaptation_set.findall(self._add_ns('Representation')):
-            self.process_representation(representation)
-
-    def process_period(self, period):
-        self.period = period
-        self.period_duration = parse_duration(period.get('duration')) or self.mpd_duration
-        self.period_ms_info = self.extract_multisegment_info(period, {
-            'start_number': 1,
-            'timescale': 1,
-        })
-        for adaptation_set in period.findall(self._add_ns('AdaptationSet')):
-            self.process_adaptation_set(adaptation_set)
-
-    def parse(self):
-        self.formats = []
-        self.mpd_duration = parse_duration(self.mpd_doc.get('mediaPresentationDuration'))
-        for period in self.mpd_doc.findall(self._add_ns('Period')):
-            self.process_period(period)
-        return self.formats
 """
