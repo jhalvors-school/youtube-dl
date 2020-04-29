@@ -131,6 +131,83 @@ class MPDParser:
             'duration': float_or_none(self.segment_d, self.representation_ms_info['timescale']),
         })
 
+    # Handle one large branch of process_video_audio
+    def media_but_no_segment_urls(self):
+        self.media_template = self.prepare_template('media', ('Number', 'Bandwidth', 'Time'))
+        self.media_location_key = MPDParser.location_key(self.media_template)
+
+        # As per [1, 5.3.9.4.4, Table 16, page 55] $Number$ and $Time$
+        # can't be used at the same time
+        if '%(Number' in self.media_template and 's' not in self.representation_ms_info:
+            self.segment_duration = None
+            if 'total_number' not in self.representation_ms_info and 'segment_duration' in self.representation_ms_info:
+                self.segment_duration = float_or_none(self.representation_ms_info['segment_duration'], self.representation_ms_info['timescale'])
+                self.representation_ms_info['total_number'] = int(math.ceil(float(self.period_duration) / self.segment_duration))
+            self.representation_ms_info['fragments'] = [{
+                self.media_location_key: self.media_template % {
+                    'Number': segment_number,
+                    'Bandwidth': self.bandwidth,
+                },
+                'duration': self.segment_duration,
+            } for segment_number in range(
+                self.representation_ms_info['start_number'],
+                self.representation_ms_info['total_number'] + self.representation_ms_info['start_number'])]
+        else:
+            # $Number*$ or $Time$ in media template with S list available
+            # Example $Number*$: http://www.svtplay.se/klipp/9023742/stopptid-om-bjorn-borg
+            # Example $Time$: https://play.arkena.com/embed/avp/v2/player/media/b41dda37-d8e7-4d3f-b1b5-9a9db578bdfe/1/129411
+            self.representation_ms_info['fragments'] = []
+            self.segment_time = 0
+            self.segment_d = None
+            self.segment_number = self.representation_ms_info['start_number']
+
+            for num, s in enumerate(self.representation_ms_info['s']):
+                self.segment_time = s.get('t') or self.segment_time
+                self.segment_d = s['d']
+                add_segment_url()
+                self.segment_number += 1
+                for r in range(s.get('r', 0)):
+                    self.segment_time += self.segment_d
+                    add_segment_url()
+                    self.segment_number += 1
+                self.segment_time += self.segment_d
+
+    # Handle another branch of process_video_audio
+    def segment_urls_with_timeline(self):
+        # No media template
+        # Example: https://www.youtube.com/watch?v=iXZV5uAYMJI
+        # or any YouTube dashsegments video
+        fragments = []
+        segment_index = 0
+        timescale = self.representation_ms_info['timescale']
+        for s in self.representation_ms_info['s']:
+            duration = float_or_none(s['d'], timescale)
+            for r in range(s.get('r', 0) + 1):
+                segment_uri = self.representation_ms_info['segment_urls'][segment_index]
+                fragments.append({
+                    location_key(segment_uri): segment_uri,
+                    'duration': duration,
+                })
+                segment_index += 1
+        self.representation_ms_info['fragments'] = fragments
+
+    def segment_urls_without_timeline(self):
+        # Segment URLs with no SegmentTimeline
+        # Example: https://www.seznam.cz/zpravy/clanek/cesko-zasahne-vitr-o-sile-vichrice-muze-byt-i-zivotu-nebezpecny-39091
+        # https://github.com/ytdl-org/youtube-dl/pull/14844
+        fragments = []
+        self.segment_duration = float_or_none(
+            self.representation_ms_info['segment_duration'],
+            self.representation_ms_info['timescale']) if 'segment_duration' in self.representation_ms_info else None
+        for segment_url in self.representation_ms_info['segment_urls']:
+            fragment = {
+                location_key(segment_url): segment_url,
+            }
+            if self.segment_duration:
+                fragment['duration'] = self.segment_duration
+            fragments.append(fragment)
+        self.representation_ms_info['fragments'] = fragments
+
     def process_video_audio(self):
         self.base_url = ''
         for element in (self.representation, self.adaptation_set, self.period, self.mpd_doc):
@@ -180,78 +257,12 @@ class MPDParser:
             }
 
         if 'segment_urls' not in self.representation_ms_info and 'media' in self.representation_ms_info:
-
-            self.media_template = self.prepare_template('media', ('Number', 'Bandwidth', 'Time'))
-            self.media_location_key = MPDParser.location_key(self.media_template)
-
-            # As per [1, 5.3.9.4.4, Table 16, page 55] $Number$ and $Time$
-            # can't be used at the same time
-            if '%(Number' in self.media_template and 's' not in self.representation_ms_info:
-                self.segment_duration = None
-                if 'total_number' not in self.representation_ms_info and 'segment_duration' in self.representation_ms_info:
-                    self.segment_duration = float_or_none(self.representation_ms_info['segment_duration'], self.representation_ms_info['timescale'])
-                    self.representation_ms_info['total_number'] = int(math.ceil(float(self.period_duration) / self.segment_duration))
-                self.representation_ms_info['fragments'] = [{
-                    self.media_location_key: self.media_template % {
-                        'Number': segment_number,
-                        'Bandwidth': self.bandwidth,
-                    },
-                    'duration': self.segment_duration,
-                } for segment_number in range(
-                    self.representation_ms_info['start_number'],
-                    self.representation_ms_info['total_number'] + self.representation_ms_info['start_number'])]
-            else:
-                # $Number*$ or $Time$ in media template with S list available
-                # Example $Number*$: http://www.svtplay.se/klipp/9023742/stopptid-om-bjorn-borg
-                # Example $Time$: https://play.arkena.com/embed/avp/v2/player/media/b41dda37-d8e7-4d3f-b1b5-9a9db578bdfe/1/129411
-                self.representation_ms_info['fragments'] = []
-                self.segment_time = 0
-                self.segment_d = None
-                self.segment_number = self.representation_ms_info['start_number']
-
-                for num, s in enumerate(self.representation_ms_info['s']):
-                    self.segment_time = s.get('t') or self.segment_time
-                    self.segment_d = s['d']
-                    add_segment_url()
-                    self.segment_number += 1
-                    for r in range(s.get('r', 0)):
-                        self.segment_time += self.segment_d
-                        add_segment_url()
-                        self.segment_number += 1
-                    self.segment_time += self.segment_d
+            self.media_but_no_segment_urls()
         elif 'segment_urls' in self.representation_ms_info and 's' in self.representation_ms_info:
-            # No media template
-            # Example: https://www.youtube.com/watch?v=iXZV5uAYMJI
-            # or any YouTube dashsegments video
-            fragments = []
-            segment_index = 0
-            timescale = self.representation_ms_info['timescale']
-            for s in self.representation_ms_info['s']:
-                duration = float_or_none(s['d'], timescale)
-                for r in range(s.get('r', 0) + 1):
-                    segment_uri = self.representation_ms_info['segment_urls'][segment_index]
-                    fragments.append({
-                        location_key(segment_uri): segment_uri,
-                        'duration': duration,
-                    })
-                    segment_index += 1
-            self.representation_ms_info['fragments'] = fragments
+            self.segment_urls_with_timeline()
         elif 'segment_urls' in self.representation_ms_info:
-            # Segment URLs with no SegmentTimeline
-            # Example: https://www.seznam.cz/zpravy/clanek/cesko-zasahne-vitr-o-sile-vichrice-muze-byt-i-zivotu-nebezpecny-39091
-            # https://github.com/ytdl-org/youtube-dl/pull/14844
-            fragments = []
-            self.segment_duration = float_or_none(
-                self.representation_ms_info['segment_duration'],
-                self.representation_ms_info['timescale']) if 'segment_duration' in self.representation_ms_info else None
-            for segment_url in self.representation_ms_info['segment_urls']:
-                fragment = {
-                    location_key(segment_url): segment_url,
-                }
-                if self.segment_duration:
-                    fragment['duration'] = self.segment_duration
-                fragments.append(fragment)
-            self.representation_ms_info['fragments'] = fragments
+            self.segment_urls_without_timeline()
+
         # If there is a fragments key available then we correctly recognized fragmented media.
         # Otherwise we will assume unfragmented media with direct access. Technically, such
         # assumption is not necessarily correct since we may simply have no support for
