@@ -208,18 +208,22 @@ class MPDParser:
             fragments.append(fragment)
         self.representation_ms_info['fragments'] = fragments
 
-    def process_video_audio(self):
-        self.base_url = ''
+    def compute_baseurl_video_audio(self):
+        base_url = ''
         for element in (self.representation, self.adaptation_set, self.period, self.mpd_doc):
             base_url_e = element.find(self._add_ns('BaseURL'))
             if base_url_e is not None:
-                self.base_url = base_url_e.text + self.base_url
-                if re.match(r'^https?://', self.base_url):
+                base_url = base_url_e.text + base_url
+                if re.match(r'^https?://', base_url):
                     break
-        if self.mpd_base_url and not re.match(r'^https?://', self.base_url):
+        if self.mpd_base_url and not re.match(r'^https?://', base_url):
             if not self.mpd_base_url.endswith('/') and not base_url.startswith('/'):
                 self.mpd_base_url += '/'
-            self.base_url = self.mpd_base_url + self.base_url
+            base_url = self.mpd_base_url + base_url
+        return base_url   
+
+    def process_video_audio(self):
+        self.base_url = self.compute_baseurl_video_audio()
         self.representation_id = self.representation_attrib.get('id')
         self.lang = self.representation_attrib.get('lang')
         self.url_el = self.representation.find(self._add_ns('BaseURL'))
