@@ -611,9 +611,8 @@ class InfoExtractor(object):
         # restriction by faking this header's value to IP that belongs to some
         # geo unrestricted country. We will do so once we encounter any
         # geo restriction error.
-        if self._x_forwarded_for_ip:
-            if 'X-Forwarded-For' not in headers:
-                headers['X-Forwarded-For'] = self._x_forwarded_for_ip
+        if self._x_forwarded_for_ip and 'X-Forwarded-For' not in headers:
+            headers['X-Forwarded-For'] = self._x_forwarded_for_ip
 
         if isinstance(url_or_request, compat_urllib_request.Request):
             url_or_request = update_Request(
@@ -2440,11 +2439,31 @@ class InfoExtractor(object):
                 })
         return formats
 
-    def _parse_html5_media_entries(self, base_url, webpage, video_id, m3u8_id=None, m3u8_entry_protocol='m3u8', mpd_id=None, preference=None):
-        def absolute_url(item_url):
-            return urljoin(base_url, item_url)
 
-        def parse_content_type(content_type):
+
+    def _media_formats(src, cur_media_type, type_info={}):
+        full_url = absolute_url(src)
+        ext = type_info.get('ext') or determine_ext(full_url)
+        if ext == 'm3u8':
+            is_plain_url = False
+            formats = self._extract_m3u8_formats(
+                full_url, video_id, ext='mp4',
+                entry_protocol=m3u8_entry_protocol, m3u8_id=m3u8_id,
+                preference=preference, fatal=False)
+        elif ext == 'mpd':
+            is_plain_url = False
+            formats = self._extract_mpd_formats(
+                full_url, video_id, mpd_id=mpd_id, fatal=False)
+        else:
+            is_plain_url = True
+            formats = [{
+                'url': full_url,
+                'vcodec': 'none' if cur_media_type == 'audio' else None,
+            }]
+        return is_plain_url, formats
+
+    def parse_content_type(content_type):
+
             if not content_type:
                 return {}
             ctr = re.search(r'(?P<mimetype>[^/]+/[^;]+)(?:;\s*codecs="?(?P<codecs>[^"]+))?', content_type)
@@ -2455,27 +2474,9 @@ class InfoExtractor(object):
                 return f
             return {}
 
-        def _media_formats(src, cur_media_type, type_info={}):
-            full_url = absolute_url(src)
-            ext = type_info.get('ext') or determine_ext(full_url)
-            if ext == 'm3u8':
-                is_plain_url = False
-                formats = self._extract_m3u8_formats(
-                    full_url, video_id, ext='mp4',
-                    entry_protocol=m3u8_entry_protocol, m3u8_id=m3u8_id,
-                    preference=preference, fatal=False)
-            elif ext == 'mpd':
-                is_plain_url = False
-                formats = self._extract_mpd_formats(
-                    full_url, video_id, mpd_id=mpd_id, fatal=False)
-            else:
-                is_plain_url = True
-                formats = [{
-                    'url': full_url,
-                    'vcodec': 'none' if cur_media_type == 'audio' else None,
-                }]
-            return is_plain_url, formats
-
+    def _parse_html5_media_entries(self, base_url, webpage, video_id, m3u8_id=None, m3u8_entry_protocol='m3u8', mpd_id=None, preference=None):
+        def absolute_url(item_url):
+            return urljoin(base_url, item_url)
         entries = []
         # amp-video and amp-audio are very similar to their HTML5 counterparts
         # so we wll include them right here (see
