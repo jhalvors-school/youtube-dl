@@ -592,6 +592,7 @@ class InfoExtractor(object):
         else:
             assert False
 
+   
     def _request_webpage(self, url_or_request, video_id, note=None, errnote=None, fatal=True, data=None, headers={}, query={}, expected_status=None):
         """
         Return the response handle.
@@ -611,17 +612,16 @@ class InfoExtractor(object):
         # restriction by faking this header's value to IP that belongs to some
         # geo unrestricted country. We will do so once we encounter any
         # geo restriction error.
-        if self._x_forwarded_for_ip:
-            if 'X-Forwarded-For' not in headers:
-                headers['X-Forwarded-For'] = self._x_forwarded_for_ip
+        if self._x_forwarded_for_ip and 'X-Forwarded-For' not in headers:
+            headers['X-Forwarded-For'] = self._x_forwarded_for_ip
 
         if isinstance(url_or_request, compat_urllib_request.Request):
             url_or_request = update_Request(
                 url_or_request, data=data, headers=headers, query=query)
         else:
-            if query:
+            if query or data is not None or headers:
                 url_or_request = update_url_query(url_or_request, query)
-            if data is not None or headers:
+            # if data is not None or headers:
                 url_or_request = sanitized_Request(url_or_request, data, headers)
         try:
             return self._downloader.urlopen(url_or_request)
@@ -634,10 +634,8 @@ class InfoExtractor(object):
                     # introduced in Python 3.4.1.
                     err.fp._error = err
                     return err.fp
-
-            if errnote is False:
-                return False
-            if errnote is None:
+            
+            if errnote is False or None :
                 errnote = 'Unable to download webpage'
 
             errmsg = '%s: %s' % (errnote, error_to_compat_str(err))
