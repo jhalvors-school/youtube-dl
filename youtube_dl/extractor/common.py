@@ -622,7 +622,8 @@ class InfoExtractor(object):
             headers['X-Forwarded-For'] = self._x_forwarded_for_ip
 
         if isinstance(url_or_request, compat_urllib_request.Request):
-            url_or_request = update_Request(url_or_request, data=data, headers=headers, query=query)
+            url_or_request = update_Request(
+                url_or_request, data=data, headers=headers, query=query)
 
         else:
 
