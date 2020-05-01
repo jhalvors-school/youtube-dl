@@ -591,6 +591,20 @@ class InfoExtractor(object):
             return expected_status(err.code) is True
         else:
             assert False
+    def _finding_errnote(errnote):
+
+            if errnote is False:
+                return False
+
+            if errnote is None:
+                errnote = 'Unable to download webpage'
+            errmsg = '%s: %s' % (errnote, error_to_compat_str(err))
+            if fatal:
+                raise ExtractorError(errmsg, sys.exc_info()[2], cause=err)
+            else:
+                self._downloader.report_warning(errmsg)
+                return False
+
 
     def _request_webpage(self, url_or_request, video_id, note=None, errnote=None, fatal=True, data=None, headers={},
                          query={}, expected_status=None):
@@ -641,18 +655,9 @@ class InfoExtractor(object):
                 err.fp._error = err
                 return err.fp
 
-            if errnote is False:
-                return False
+            self._finding_errnote(errnote)
 
-            if errnote is None:
-                errnote = 'Unable to download webpage'
 
-            errmsg = '%s: %s' % (errnote, error_to_compat_str(err))
-            if fatal:
-                raise ExtractorError(errmsg, sys.exc_info()[2], cause=err)
-            else:
-                self._downloader.report_warning(errmsg)
-                return False
 
     def _download_webpage_handle(self, url_or_request, video_id, note=None, errnote=None, fatal=True, encoding=None,
                                  data=None, headers={}, query={}, expected_status=None):
