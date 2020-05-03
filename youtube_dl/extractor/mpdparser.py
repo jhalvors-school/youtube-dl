@@ -164,11 +164,11 @@ class MPDParser:
             for num, s in enumerate(self.representation_ms_info['s']):
                 self.segment_time = s.get('t') or self.segment_time
                 self.segment_d = s['d']
-                add_segment_url()
+                self.add_segment_url()
                 self.segment_number += 1
                 for r in range(s.get('r', 0)):
                     self.segment_time += self.segment_d
-                    add_segment_url()
+                    self.add_segment_url()
                     self.segment_number += 1
                 self.segment_time += self.segment_d
 
@@ -185,7 +185,7 @@ class MPDParser:
             for r in range(s.get('r', 0) + 1):
                 segment_uri = self.representation_ms_info['segment_urls'][segment_index]
                 fragments.append({
-                    location_key(segment_uri): segment_uri,
+                    MPDParser.location_key(segment_uri): segment_uri,
                     'duration': duration,
                 })
                 segment_index += 1
@@ -201,7 +201,7 @@ class MPDParser:
             self.representation_ms_info['timescale']) if 'segment_duration' in self.representation_ms_info else None
         for segment_url in self.representation_ms_info['segment_urls']:
             fragment = {
-                location_key(segment_url): segment_url,
+                MPDParser.location_key(segment_url): segment_url,
             }
             if self.segment_duration:
                 fragment['duration'] = self.segment_duration
