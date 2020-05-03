@@ -1182,16 +1182,33 @@ class InfoExtractor(object):
                                       'twitter card player')
 
     def _search_json_ld(self, html, video_id, expected_type=None, **kwargs):
-        json_ld = self._search_regex(
-            JSON_LD_RE, html, 'JSON-LD', group='json_ld', **kwargs)
+        json_ld_list = list(re.finditer(JSON_LD_RE, html))
         default = kwargs.get('default', NO_DEFAULT)
-        if not json_ld:
-            return default if default is not NO_DEFAULT else {}
         # JSON-LD may be malformed and thus `fatal` should be respected.
         # At the same time `default` may be passed that assumes `fatal=False`
         # for _search_regex. Let's simulate the same behavior here as well.
         fatal = kwargs.get('fatal', True) if default == NO_DEFAULT else False
-        return self._json_ld(json_ld, video_id, fatal=fatal, expected_type=expected_type)
+        json_ld = []
+        for mobj in json_ld_list:
+            json_ld_item = self._parse_json(
+                mobj.group('json_ld'), video_id, fatal=fatal)
+            if not json_ld_item:
+                continue
+            if isinstance(json_ld_item, dict):
+                json_ld.append(json_ld_item)
+            elif isinstance(json_ld_item, (list, tuple)):
+                json_ld.extend(json_ld_item)
+        if json_ld:
+            json_ld = self._json_ld(json_ld, video_id, fatal=fatal, expected_type=expected_type)
+        if json_ld:
+            return json_ld
+        if default is not NO_DEFAULT:
+            return default
+        elif fatal:
+            raise RegexNotFoundError('Unable to extract JSON-LD')
+        else:
+            self._downloader.report_warning('unable to extract JSON-LD %s' % bug_reports_message())
+            return {}
 
     def _json_ld(self, json_ld, video_id, fatal=True, expected_type=None):
         if isinstance(json_ld, compat_str):
@@ -1256,10 +1273,10 @@ class InfoExtractor(object):
             extract_interaction_statistic(e)
 
         for e in json_ld:
-            if isinstance(e.get('@context'), compat_str) and re.match(r'^https?://schema.org/?$', e.get('@context')):
+            if '@context' in e:
                 item_type = e.get('@type')
                 if expected_type is not None and expected_type != item_type:
-                    return info
+                    continue
                 if item_type in ('TVEpisode', 'Episode'):
                     episode_name = unescapeHTML(e.get('name'))
                     info.update({
@@ -1293,11 +1310,17 @@ class InfoExtractor(object):
                     })
                 elif item_type == 'VideoObject':
                     extract_video_object(e)
-                    continue
+                    if expected_type is None:
+                        continue
+                    else:
+                        break
                 video = e.get('video')
                 if isinstance(video, dict) and video.get('@type') == 'VideoObject':
                     extract_video_object(video)
-                break
+                if expected_type is None:
+                    continue
+                else:
+                    break
         return dict((k, v) for k, v in info.items() if v is not None)
 
     @staticmethod
@@ -2440,22 +2463,7 @@ class InfoExtractor(object):
                 })
         return formats
 
-    def _parse_html5_media_entries(self, base_url, webpage, video_id, m3u8_id=None, m3u8_entry_protocol='m3u8', mpd_id=None, preference=None):
-        def absolute_url(item_url):
-            return urljoin(base_url, item_url)
-
-        def parse_content_type(content_type):
-            if not content_type:
-                return {}
-            ctr = re.search(r'(?P<mimetype>[^/]+/[^;]+)(?:;\s*codecs="?(?P<codecs>[^"]+))?', content_type)
-            if ctr:
-                mimetype, codecs = ctr.groups()
-                f = parse_codecs(codecs)
-                f['ext'] = mimetype2ext(mimetype)
-                return f
-            return {}
-
-        def _media_formats(src, cur_media_type, type_info={}):
+    def _media_formats(src, cur_media_type, type_info={}):
             full_url = absolute_url(src)
             ext = type_info.get('ext') or determine_ext(full_url)
             if ext == 'm3u8':
@@ -2475,6 +2483,61 @@ class InfoExtractor(object):
                     'vcodec': 'none' if cur_media_type == 'audio' else None,
                 }]
             return is_plain_url, formats
+            
+    def _check_media_tag(self, media_tag, media_type, media_content):
+        for media_tag, media_type, media_content in media_tags:
+            media_info = {
+                'formats': [],
+                'subtitles': {},
+            }
+            media_attributes = extract_attributes(media_tag)
+            src = strip_or_none(media_attributes.get('src'))
+        return(media_attributes,src)
+
+    def _width_height_values(self,width,height,resolution,labels):
+        if not width or not height:
+            for lbl in labels:
+                resolution = parse_resolution(lbl)
+                if not resolution:
+                    continue
+                width = width or resolution.get('width')
+                height = height or resolution.get('height')
+                return(width,height,resolution,labels)
+
+        if is_plain_url:
+                        # width, height, res, label and title attributes are
+                        # all not standard but seen several times in the wild
+            labels = [
+                    s_attr.get(lbl)
+                    for lbl in ('label', 'title')
+                    if str_or_none(s_attr.get(lbl))
+                ]
+            width = int_or_none(s_attr.get('width'))
+            height = (int_or_none(s_attr.get('height'))
+                    or int_or_none(s_attr.get('res')))
+            return(width,height,resolution,labels)
+
+    def _parse_html5_media_entries(self, base_url, webpage, video_id, m3u8_id=None, m3u8_entry_protocol='m3u8', mpd_id=None, preference=None):
+
+        def absolute_url(self, item_url):
+            return urljoin(base_url, item_url)
+
+        def parse_content_type(self, content_type):
+            if not content_type:
+                return {}
+            ctr = re.search(r'(?P<mimetype>[^/]+/[^;]+)(?:;\s*codecs="?(?P<codecs>[^"]+))?', content_type)
+            if ctr:
+                mimetype, codecs = ctr.groups()
+                f = parse_codecs(codecs)
+                f['ext'] = mimetype2ext(mimetype)
+                return f
+            return {}
+        
+        item_url=absolute_url(item_url)
+        
+        content_type=parse_content_type(content_type)
+
+        src,cur_media_type,type_info=_media_formats(src,cur_media_type,type_info)
 
         entries = []
         # amp-video and amp-audio are very similar to their HTML5 counterparts
@@ -2489,77 +2552,51 @@ class InfoExtractor(object):
             # https://github.com/ytdl-org/youtube-dl/issues/11979, example URL:
             # http://www.porntrex.com/maps/videositemap.xml).
             r'(?s)(<(?P<tag>(?:amp-)?(?:video|audio))(?:\s+[^>]*)?>)(.*?)</(?P=tag)>', webpage))
-        for media_tag, media_type, media_content in media_tags:
-            media_info = {
-                'formats': [],
-                'subtitles': {},
-            }
-            media_attributes = extract_attributes(media_tag)
-            src = strip_or_none(media_attributes.get('src'))
-            if src:
-                _, formats = _media_formats(src, media_type)
-                media_info['formats'].extend(formats)
-            media_info['thumbnail'] = absolute_url(media_attributes.get('poster'))
-            if media_content:
-                for source_tag in re.findall(r'<source[^>]+>', media_content):
-                    s_attr = extract_attributes(source_tag)
+        media_attributes,src=_check_media_tag()
+        if src:
+            _, formats = _media_formats(src, media_type)
+            media_info['formats'].extend(formats)
+        media_info['thumbnail'] = absolute_url(media_attributes.get('poster'))
+        if media_content:
+            for source_tag in re.findall(r'<source[^>]+>', media_content):
+                s_attr = extract_attributes(source_tag)
                     # data-video-src and data-src are non standard but seen
                     # several times in the wild
-                    src = strip_or_none(dict_get(s_attr, ('src', 'data-video-src', 'data-src')))
-                    if not src:
-                        continue
-                    f = parse_content_type(s_attr.get('type'))
-                    is_plain_url, formats = _media_formats(src, media_type, f)
-                    if is_plain_url:
-                        # width, height, res, label and title attributes are
-                        # all not standard but seen several times in the wild
-                        labels = [
-                            s_attr.get(lbl)
-                            for lbl in ('label', 'title')
-                            if str_or_none(s_attr.get(lbl))
-                        ]
-                        width = int_or_none(s_attr.get('width'))
-                        height = (int_or_none(s_attr.get('height'))
-                                  or int_or_none(s_attr.get('res')))
-                        if not width or not height:
-                            for lbl in labels:
-                                resolution = parse_resolution(lbl)
-                                if not resolution:
-                                    continue
-                                width = width or resolution.get('width')
-                                height = height or resolution.get('height')
-                        for lbl in labels:
-                            tbr = parse_bitrate(lbl)
-                            if tbr:
-                                break
-                        else:
-                            tbr = None
-                        f.update({
-                            'width': width,
-                            'height': height,
-                            'tbr': tbr,
-                            'format_id': s_attr.get('label') or s_attr.get('title'),
-                        })
-                        f.update(formats[0])
-                        media_info['formats'].append(f)
-                    else:
-                        media_info['formats'].extend(formats)
-                for track_tag in re.findall(r'<track[^>]+>', media_content):
-                    track_attributes = extract_attributes(track_tag)
-                    kind = track_attributes.get('kind')
-                    if not kind or kind in ('subtitles', 'captions'):
-                        src = strip_or_none(track_attributes.get('src'))
-                        if not src:
-                            continue
-                        lang = track_attributes.get('srclang') or track_attributes.get('lang') or track_attributes.get('label')
-                        media_info['subtitles'].setdefault(lang, []).append({
-                            'url': absolute_url(src),
-                        })
-            for f in media_info['formats']:
-                f.setdefault('http_headers', {})['Referer'] = base_url
-            if media_info['formats'] or media_info['subtitles']:
-                entries.append(media_info)
-        return entries
+                src = strip_or_none(dict_get(s_attr, ('src', 'data-video-src', 'data-src')))
+                f = parse_content_type(s_attr.get('type'))
+                is_plain_url, formats = _media_formats(src, media_type, f)
+                
+                width,height,resolution,labels=_width_height_values(width,height,resolution,labels)
+                for lbl in labels:
+                    tbr = parse_bitrate(lbl)
+                    if tbr:
+                        break
+                f.update({
+                    'width': width,
+                    'height': height,
+                    'tbr': tbr,
+                    'format_id': s_attr.get('label') or s_attr.get('title'),
+                })
+                f.update(formats[0])
+                media_info['formats'].append(f)
+            else:
+                media_info['formats'].extend(formats)
+        for track_tag in re.findall(r'<track[^>]+>', media_content):
+            track_attributes = extract_attributes(track_tag)
+            kind = track_attributes.get('kind')
+            if not kind or kind in ('subtitles', 'captions'):
+                src = strip_or_none(track_attributes.get('src'))
+                if not src:
+                    continue
+                lang = track_attributes.get('srclang') or track_attributes.get('lang') or track_attributes.get('label')
+                media_info['subtitles'].setdefault(lang, []).append({
+                    'url': absolute_url(src),
+                })
+    for f in media_info['formats']:
+        f.setdefault('http_headers', {})['Referer'] = base_url
+    if media_info['formats'] or media_info['subtitles']:
+        entries.append(media_info)
+    return entries
 
     def _extract_akamai_formats(self, manifest_url, video_id, hosts={}):
         formats = []
